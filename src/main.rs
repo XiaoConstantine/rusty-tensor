@@ -11,11 +11,7 @@ struct Context {
 
 impl Context {
     fn new(arg: Rc<RefCell<dyn Function>>, parents: Vec<Rc<Tensor>>) -> Self {
-        Context {
-            arg,
-            parents,
-            saved_tensors: vec![],
-        }
+        Context { arg, parents, saved_tensors: vec![] }
     }
 
     fn save_for_backward(&mut self, tensors: ArrayD<f32>) {
@@ -32,27 +28,17 @@ struct Tensor {
 impl Tensor {
     fn new(data: ArrayD<f32>) -> Tensor {
         let grad = ArrayD::<f32>::zeros(data.raw_dim());
-        Tensor {
-            data,
-            grad: RefCell::new(grad),
-            ctx: None,
-        }
+        Tensor { data, grad: RefCell::new(grad), ctx: None }
     }
 
     fn backward(&self, allow_fill: bool) {
         if let Some(ctx) = &self.ctx {
             let ctx_ref = ctx.borrow();
             if self.grad.borrow().sum().abs() < f32::EPSILON && !allow_fill {
-                assert!(
-                    self.data.len() == 1,
-                    "data size must be 1 for auto-fill gradient"
-                );
+                assert!(self.data.len() == 1, "data size must be 1 for auto-fill gradient");
                 *self.grad.borrow_mut() = ArrayD::ones(self.data.raw_dim());
             }
-            assert!(
-                self.grad.borrow().sum().abs() >= f32::EPSILON,
-                "grad must not be None"
-            );
+            assert!(self.grad.borrow().sum().abs() >= f32::EPSILON, "grad must not be None");
             let grads = ctx_ref
                 .arg
                 .borrow()
@@ -85,14 +71,10 @@ impl Function for Dot {
         let input = &inputs[0];
         let weight = &inputs[1];
         // Convert ArrayD<f32> to Array2<f32> for dot operation if necessary
-        let input_2d = input
-            .view()
-            .into_dimensionality::<Ix2>()
-            .expect("Input must be 2D for dot product.");
-        let weight_2d = weight
-            .view()
-            .into_dimensionality::<Ix2>()
-            .expect("Weight must be 2D for dot product.");
+        let input_2d =
+            input.view().into_dimensionality::<Ix2>().expect("Input must be 2D for dot product.");
+        let weight_2d =
+            weight.view().into_dimensionality::<Ix2>().expect("Weight must be 2D for dot product.");
         let result = input_2d.dot(&weight_2d);
         result.into_dyn()
     }
@@ -106,14 +88,8 @@ impl Function for Dot {
             .view()
             .into_dimensionality::<Ix2>()
             .expect("Grad output must be 2D for dot product.");
-        let a_2d = saved_tensors[0]
-            .view()
-            .into_dimensionality::<Ix2>()
-            .unwrap();
-        let b_2d = saved_tensors[1]
-            .view()
-            .into_dimensionality::<Ix2>()
-            .unwrap();
+        let a_2d = saved_tensors[0].view().into_dimensionality::<Ix2>().unwrap();
+        let b_2d = saved_tensors[1].view().into_dimensionality::<Ix2>().unwrap();
 
         let grad_a = grad_output_2d.dot(&b_2d.t());
         let grad_b = a_2d.t().dot(&grad_output_2d);
@@ -125,9 +101,7 @@ pub fn are_tensors_close(a: &ArrayD<f32>, b: &ArrayD<f32>, tolerance: f32) -> bo
     if a.shape() != b.shape() {
         return false;
     }
-    a.iter()
-        .zip(b.iter())
-        .all(|(&a, &b)| (a - b).abs() < tolerance)
+    a.iter().zip(b.iter()).all(|(&a, &b)| (a - b).abs() < tolerance)
 }
 
 #[cfg(test)]
@@ -161,13 +135,9 @@ mod tests {
         );
 
         // Simulate backward propagation with a gradient output
-        let grad_output = Array::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0])
-            .unwrap()
-            .into_dyn();
-        let grads = context
-            .arg
-            .borrow()
-            .backward(context.saved_tensors, grad_output);
+        let grad_output =
+            Array::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap().into_dyn();
+        let grads = context.arg.borrow().backward(context.saved_tensors, grad_output);
         // Calculate expected gradients manually or through another method
         let expected_grad_input = arr2(&[[3.5, 9.5, 15.5], [7.5, 21.5, 35.5]]).into_dyn();
         let expected_grad_weight = arr2(&[[13.0, 18.0], [17.0, 24.0], [21.0, 30.0]]).into_dyn();
