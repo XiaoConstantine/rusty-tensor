@@ -2,27 +2,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ndarray::{ArrayD, Ix2};
-// Context to hold intermediate values for backward pass
-struct Context {
-    arg: Rc<RefCell<dyn Function>>,
-    parents: Vec<Rc<Tensor>>,
-    saved_tensors: Vec<ArrayD<f32>>,
-}
-
-impl Context {
-    fn new(arg: Rc<RefCell<dyn Function>>, parents: Vec<Rc<Tensor>>) -> Self {
-        Context { arg, parents, saved_tensors: vec![] }
-    }
-
-    fn save_for_backward(&mut self, tensors: ArrayD<f32>) {
-        self.saved_tensors.push(tensors);
-    }
-}
 
 struct Tensor {
     data: ArrayD<f32>,
     grad: RefCell<ArrayD<f32>>,
-    ctx: Option<Rc<RefCell<Context>>>,
+    ctx: Option<Rc<RefCell<Function>>>,
 }
 
 impl Tensor {
@@ -39,10 +23,8 @@ impl Tensor {
                 *self.grad.borrow_mut() = ArrayD::ones(self.data.raw_dim());
             }
             assert!(self.grad.borrow().sum().abs() >= f32::EPSILON, "grad must not be None");
-            let grads = ctx_ref
-                .arg
-                .borrow()
-                .backward(ctx_ref.saved_tensors.clone(), self.grad.borrow().clone());
+            let grads =
+                ctx.borrow().backward(ctx_ref.saved_tensors.clone(), self.grad.borrow().clone());
 
             for (parent, grad) in ctx_ref.parents.iter().zip(grads) {
                 *parent.grad.borrow_mut() += &grad;
@@ -52,7 +34,13 @@ impl Tensor {
     }
 }
 
-pub trait Function {
+#[derive(Clone)]
+struct Function {
+    parents: Vec<Rc<Tensor>>,
+    saved_tensors: Vec<ArrayD<f32>>,
+}
+
+trait FunctionTrait {
     fn apply(&self, inputs: &[ArrayD<f32>]) -> ArrayD<f32>;
     fn backward(
         &self,
@@ -61,9 +49,17 @@ pub trait Function {
     ) -> Vec<ArrayD<f32>>;
 }
 
-struct Dot;
+impl Function {
+    fn new(parents: Vec<Rc<Tensor>>) -> Self {
+        Function { parents, saved_tensors: vec![] }
+    }
 
-impl Function for Dot {
+    fn save_for_backward(&mut self, tensors: ArrayD<f32>) {
+        self.saved_tensors.push(tensors);
+    }
+}
+
+impl FunctionTrait for Function {
     fn apply(&self, inputs: &[ArrayD<f32>]) -> ArrayD<f32> {
         // Ensure there are exactly two inputs: input and weight
         assert_eq!(inputs.len(), 2, "Dot function expects exactly 2 inputs.");
@@ -101,59 +97,95 @@ pub fn are_tensors_close(a: &ArrayD<f32>, b: &ArrayD<f32>, tolerance: f32) -> bo
     if a.shape() != b.shape() {
         return false;
     }
-    a.iter().zip(b.iter()).all(|(&a, &b)| (a - b).abs() < tolerance)
+    a.iter().zip(b.iter()).all(|(&a, &b)| (a - b).abs() <= tolerance)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{arr2, Array};
 
     #[test]
-    fn test_dot_operation_and_backward() {
-        // Define input and weight tensors
-        let input_data = Array::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let weight_data =
-            Array::from_shape_vec((3, 2), vec![0.5, 1.5, 2.5, 3.5, 4.5, 5.5]).unwrap();
+    fn test_tensor_backward() {
+        // Create a tensor with some data
+        let data = ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let tensor = Tensor::new(data);
 
-        let input_tensor = Rc::new(Tensor::new(input_data.into_dyn()));
-        let weight_tensor = Rc::new(Tensor::new(weight_data.into_dyn()));
+        // Call the backward method
+        tensor.backward(false);
 
-        let dot = Dot;
-        let mut context = Context::new(Rc::new(RefCell::new(dot)), vec![]);
-        context.save_for_backward(input_tensor.data.clone());
-        context.save_for_backward(weight_tensor.data.clone());
+        // Assert that the gradients have been updated correctly
+        let grad = tensor.grad.borrow();
+        assert_eq!(grad.shape(), &[2, 2]);
+        assert_eq!(grad[[0, 0]], 0.0);
+        assert_eq!(grad[[0, 1]], 0.0);
+        assert_eq!(grad[[1, 0]], 0.0);
+        assert_eq!(grad[[1, 1]], 0.0);
+    }
 
-        let inputs = vec![input_tensor.data.clone(), weight_tensor.data.clone()];
-        let result = context.arg.borrow().apply(&inputs);
+    #[test]
+    fn test_function_apply() {
+        // Create a function
+        let function = Function::new(vec![]);
 
-        // Expected result of the dot operation
-        let expected_result = arr2(&[[19.0, 25.0], [41.5, 56.5]]).into_dyn();
-        assert!(
-            are_tensors_close(&result, &expected_result, 1e-6),
-            "Dot operation result does not match expected."
-        );
+        // Create input arrays
+        let input1 = ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let input2 = ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]).unwrap();
+        let inputs = vec![input1, input2];
 
-        // Simulate backward propagation with a gradient output
+        // Call the apply method
+        let result = function.apply(&inputs);
+
+        // Assert that the result is correct
+        assert_eq!(result.shape(), &[2, 2]);
+        assert_eq!(result[[0, 0]], 19.0);
+        assert_eq!(result[[0, 1]], 22.0);
+        assert_eq!(result[[1, 0]], 43.0);
+        assert_eq!(result[[1, 1]], 50.0);
+    }
+
+    #[test]
+    fn test_function_backward() {
+        // Create a function
+        let function = Function::new(vec![]);
+
+        // Create saved tensors and gradient output
+        let saved_tensors = vec![
+            ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap(),
+            ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]).unwrap(),
+        ];
         let grad_output =
-            Array::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap().into_dyn();
-        let grads = context.arg.borrow().backward(context.saved_tensors, grad_output);
-        // Calculate expected gradients manually or through another method
-        let expected_grad_input = arr2(&[[3.5, 9.5, 15.5], [7.5, 21.5, 35.5]]).into_dyn();
-        let expected_grad_weight = arr2(&[[13.0, 18.0], [17.0, 24.0], [21.0, 30.0]]).into_dyn();
+            ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![9.0, 10.0, 11.0, 12.0]).unwrap();
 
-        // Extract the computed gradients for input and weight
-        let grad_input_computed = &grads[0];
-        let grad_weight_computed = &grads[1];
-        assert!(
-            are_tensors_close(&expected_grad_input, &grad_input_computed, 1e-6),
-            "Dot operation result does not match expected."
-        );
-        assert!(
-            are_tensors_close(&expected_grad_weight, &grad_weight_computed, 1e-6),
-            "Dot operation result does not match expected."
-        );
+        // Call the backward method
+        let grads = function.backward(saved_tensors, grad_output);
+
+        // Assert that the gradients are correct
+        assert_eq!(grads.len(), 2);
+
+        let grad_a = &grads[0];
+        assert_eq!(grad_a.shape(), &[2, 2]);
+        assert_eq!(grad_a[[0, 0]], 105.0);
+        assert_eq!(grad_a[[0, 1]], 143.0);
+        assert_eq!(grad_a[[1, 0]], 127.0);
+        assert_eq!(grad_a[[1, 1]], 173.0);
+
+        let grad_b = &grads[1];
+        assert_eq!(grad_b.shape(), &[2, 2]);
+        assert_eq!(grad_b[[0, 0]], 42.0);
+        assert_eq!(grad_b[[0, 1]], 46.0);
+        assert_eq!(grad_b[[1, 0]], 62.0);
+        assert_eq!(grad_b[[1, 1]], 68.0);
+    }
+
+    #[test]
+    fn test_are_tensors_close() {
+        let a = ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let b = ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        assert!(are_tensors_close(&a, &b, 0.0));
+
+        let c = ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let d = ArrayD::<f32>::from_shape_vec(vec![2, 2], vec![1.1, 2.1, 3.1, 4.1]).unwrap();
+        assert!(!are_tensors_close(&c, &d, 0.1));
     }
 }
-
 fn main() {}
